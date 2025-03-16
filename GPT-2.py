@@ -83,7 +83,7 @@ class CausalSelfAttention(nn.Module):
     
     def forward(self,x):
         B,T,C = x.shape
-        k,q,v = self.csAttn(x).split(n_embed,dim=-1)
+        q,k,v = self.csAttn(x).split(n_embed,dim=-1)
 
         k = k.view(B,T,n_heads,self.headsize).transpose(1,2) # B,n_head,T,headsize
         q = q.view(B,T,n_heads,self.headsize).transpose(1,2)
@@ -152,8 +152,8 @@ class FForward(nn.Module):
 class TransformerDecoderBlock(nn.Module):
     def __init__(self):
         super().__init__()
-        # self.attention = Multihead()
-        self.attention = CausalSelfAttention()
+        # self.attention = Multihead() # using Causual attention insted for efficiency
+        self.attention = CausalSelfAttention() # B,T,C
         self.ffnn = FForward()
         self.layern1 = nn.LayerNorm(n_embed)
         self.layern2 = nn.LayerNorm(n_embed)
@@ -177,9 +177,9 @@ class GPT(nn.Module):
         B,T, = idx.shape
         tok_embed = self.embedding_table(idx) # B,T,C
         pos_embed = self.positional_embedding(torch.arange(T,device=device))
-        x = tok_embed + pos_embed
+        x = tok_embed + pos_embed # B,T,C
         x = self.transformerdecode(x)
-        x = self.layern1(x)
+        x = self.layern1(x) # B,T,C
         logits = self.linear1(x)
 
         if target is None:
