@@ -3,10 +3,11 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 import mlflow as mlflow
+import math
 
 # Hyper Parameters
 batch_size = 64
-block_size = 256
+block_size = 32
 lrsloss = []
 lossi = []
 lr = 1e-3
@@ -14,15 +15,15 @@ max_iter = 5000
 step_iter = 500
 eval_iter = 200
 n_embed = 128
-n_heads = 32
-n_layer = 8
+n_heads = 8
+n_layer = 4
 dropout = 0.2
 Bias = False
 
 if torch.cuda.is_available():
     device = 'cuda'
-elif torch.backends.mps.is_available():
-    device = "mps"
+# elif torch.backends.mps.is_available():
+#     device = "mps"
 else:
     device = "cpu"
 
@@ -69,16 +70,34 @@ def get_batch(split:str):
     return x,y
 
 
-class CasualSelfAttention(nn.Module):
-    def __init__(self,head_size):
+class CausalSelfAttention(nn.Module):
+    def __init__(self):
         super().__init__()
+        assert n_embed % n_heads == 0
+        self.headsize = n_embed//n_heads
         self.csAttn = nn.Linear(n_embed,3 *n_embed ,bias = Bias)
-        self.register_buffer("tril",torch.tril(torch.ones(block_size,block_size)))
-        self.dropout = nn.Dropout(dropout)
+        self.mh_proj = nn.Linear(n_embed,n_embed ,bias = Bias)
+        self.register_buffer("tril",torch.tril(torch.ones(block_size,block_size)).view(1,1,block_size,block_size))
+        self.attdropout = nn.Dropout(dropout)
+        self.mhdropout = nn.Dropout(dropout)
     
     def forward(self,x):
         B,T,C = x.shape
-        k,q,v = self.csAttn(x).split(32,dim=-1)
+        k,q,v = self.csAttn(x).split(n_embed,dim=-1)
+
+        k = k.view(B,T,n_heads,self.headsize).transpose(1,2) # B,n_head,T,headsize
+        q = q.view(B,T,n_heads,self.headsize).transpose(1,2)
+        v = v.view(B,T,n_heads,self.headsize).transpose(1,2)
+
+        wei = q @ k.transpose(-2,-1) * (1/math.sqrt(k.shape[-1])) # B,n_head,T,headsize X # B,n_head,headsize,T = B,n_head,T,T
+        wei = wei.masked_fill(self.tril[:,:,:T,:T]==0,float('-inf'))
+        wei = F.softmax(wei,dim=-1)
+        wei = self.attdropout(wei)
+        out = wei @ v #  B,n_head,T,T x # B,n_head,T,nheadsize = B,n_head,T,headsize
+        out = out.transpose(1,2).contiguous().view(B,T,C)
+        out = self.mhdropout(self.mh_proj(out))
+
+        return out
 
 class Head(nn.Module):
     def __init__(self,head_size):
@@ -99,7 +118,8 @@ class Head(nn.Module):
         self.wei = F.softmax(self.wei,dim=-1)
         self.wei = self.dropout(self.wei)
         v = self.value(x)
-        out = self.wei @  v 
+        out = self.wei @  v
+        
 
         return out
 
@@ -132,7 +152,8 @@ class FForward(nn.Module):
 class TransformerDecoderBlock(nn.Module):
     def __init__(self):
         super().__init__()
-        self.attention = Multihead()
+        # self.attention = Multihead()
+        self.attention = CausalSelfAttention()
         self.ffnn = FForward()
         self.layern1 = nn.LayerNorm(n_embed)
         self.layern2 = nn.LayerNorm(n_embed)
