@@ -2,27 +2,24 @@
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
-import mlflow as mlflow
+# import mlflow as mlflow
 import math
 from dataclasses import dataclass
 
-# Hyper Parameters
-lr = 1e-3
-max_iter = 5000
-step_iter = 500
-eval_iter = 200
+
+
 
 if torch.cuda.is_available():
     device = 'cuda'
-# elif torch.backends.mps.is_available():
-#     device = "mps"
+elif torch.backends.mps.is_available():
+    device = "mps"
 else:
     device = "cpu"
 
 
 torch.manual_seed(1337)
 
-shakspheredata= open("../datasets/llm/shakeshpere.txt",mode="r",encoding="utf8").read()
+shakspheredata= open("shakeshpere.txt",mode="r",encoding="utf8").read()
 vocab = sorted(list(set(shakspheredata)))
 
 stoi = {k:v for v,k in enumerate(vocab)}
@@ -44,11 +41,11 @@ def esitimate_loss():
     model.eval()
     for mode in ["train","val"]:
         losses = 0
-        for i in range(eval_iter):
-            X,Y = get_batch(mode,GPTconfig())
+        for i in range(hconfig.eval_iter):
+            X,Y = get_batch(mode,hconfig)
             _,lossb = model(X,Y)
             losses = losses+lossb
-        out[mode] = losses/eval_iter
+        out[mode] = losses/hconfig.eval_iter
     model.train()
     return out
 
@@ -131,7 +128,7 @@ class GPT(nn.Module):
          # B,T,vocab_size
     
     def forward(self,idx,target=None):
-        
+        self.train()
         B,T, = idx.shape
         tok_embed = self.transformer.wte(idx) # B,T,C
         pos_embed = self.transformer.wpe(torch.arange(T,device=device))
@@ -150,7 +147,9 @@ class GPT(nn.Module):
             loss = F.cross_entropy(logits,targets)
         return logits,loss
 
+    @torch.no_grad()
     def generate(self,max_tokens:int,idx:torch.Tensor,config):
+        self.eval()
         for _ in range(max_tokens):
             idx_cond = idx[:, -config.block_size:]
             logits,loss = self(idx_cond) # B,T,C
@@ -161,35 +160,37 @@ class GPT(nn.Module):
 
         return idx
 
+# Hyper Parameters
 @dataclass
 class GPTconfig:
     nvocab = len(vocab)#50257
     batch_size = 64
-    block_size = 8
-    max_iter = 5000
+    block_size = 256
+    lr = 1e-3
+    max_iter = 1000
     step_iter = 500
     eval_iter = 200
-    n_embed = 32
-    n_heads = 4
-    n_layer = 4
+    n_embed = 256
+    n_heads = 8
+    n_layer = 8
     dropout = 0.2
     Bias = False
-
-model = GPT(GPTconfig())
+hconfig = GPTconfig()
+model = GPT(hconfig)
 m = model.to(device)
-optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
+optimizer = torch.optim.AdamW(model.parameters(), lr=hconfig.lr)
 print(sum(p.numel() for p in m.parameters())/1e6, 'M parameters')
 
 
 #Training
 print(f"Start Training in {device}")
-for i in range(max_iter):
-    if i % step_iter== 0:
+for i in range(hconfig.max_iter):
+    if i % hconfig.step_iter== 0:
         eloss = esitimate_loss()
         print(f"Loss at {i}: Train loss: {eloss['train']} | Validation loss :{eloss['val']}")
 
     #Forward Pass
-    xb,yb = get_batch('train',GPTconfig())
+    xb,yb = get_batch('train',hconfig)
     
     logits,loss = model(xb,yb)
     
@@ -201,4 +202,4 @@ for i in range(max_iter):
 print(F" Final loss: {loss.item():.4f}")
 
 #Generation
-print(decode(model.generate(1000,idx = torch.zeros((1,1),dtype=torch.long))[0].tolist()))
+print(decode(model.generate(1000,idx = torch.zeros((1,1),dtype=torch.long,device=device),config=hconfig)[0].tolist()))
