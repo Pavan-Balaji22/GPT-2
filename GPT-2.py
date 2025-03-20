@@ -6,13 +6,12 @@ import math
 from dataclasses import dataclass
 import tiktoken
 
-
-
+# Device selection #
 
 if torch.cuda.is_available():
     device = 'cuda'
-elif torch.backends.mps.is_available():
-    device = "mps"
+# elif torch.backends.mps.is_available():
+#     device = "mps"
 else:
     device = "cpu"
 
@@ -20,25 +19,14 @@ else:
 torch.manual_seed(1337)
 
 shakspheredata= open("shakeshpere.txt",mode="r",encoding="utf8").read()
-# vocab = sorted(list(set(shakspheredata)))
-
-# stoi = {k:v for v,k in enumerate(vocab)}
-# itos = {v:k for v,k in enumerate(vocab)}
-# encode = lambda x:[stoi[i] for i in x]
-# decode = lambda x: "".join([itos[i] for i in x])
-
-#Data preparation
-# text = torch.tensor(encode(shakspheredata))
-
 
 tokenizer = tiktoken.get_encoding("gpt2")
-tokens = torch.tensor(tokenizer.encode(shakspheredata))
 encode = tokenizer.encode
 decode = tokenizer.decode
 
-n = int(.9*len(tokens))
-train = tokens[:n]
-val = tokens[n:]
+n = int(.9*len(shakspheredata))
+train = shakspheredata[:n]
+val = shakspheredata[n:]
 
 @torch.no_grad()
 def esitimate_loss():
@@ -47,22 +35,35 @@ def esitimate_loss():
     for mode in ["train","val"]:
         losses = 0
         for i in range(hconfig.eval_iter):
-            X,Y = get_batch(mode,hconfig)
+            X,Y = evalloader.get_batch(mode,hconfig)
             _,lossb = model(X,Y)
             losses = losses+lossb
         out[mode] = losses/hconfig.eval_iter
     model.train()
     return out
 
-def get_batch(split:str,config):
-    data = train if split == "train" else val
-    data = data[torch.randint(high=len(data),size=((config.batch_size*config.block_size)+1,))]
-    x = data[:-1].view(config.batch_size,config.block_size)
-    y = data[1:].view(config.batch_size,config.block_size)
-    x, y = x.to(device), y.to(device)
-    return x,y
+# Data loader #
+class DataLoader:
+    def __init__(self,B,T,data):
+        self.tokens = torch.tensor(encode(data))
+        self.B,self.T = B,T
+        self.length = len(self.tokens)
+        self.cur_pos = 0
+        self.epoch = 0
+        print(f"Total number of tokens:{self.length}")
+        
+    def get_batch(self):
+        data = self.tokens[self.cur_pos:((self.B*self.T)+1+self.cur_pos)]
+        x = data[:-1].view(self.B,self.T)
+        y = data[1:].view(self.B,self.T)
+        x, y = x.to(device), y.to(device)
+        self.cur_pos += (self.B*self.T)+1
+        if self.cur_pos > self.length:
+            self.epoch += 1
+            self.cur_pos = 0
+        return x,y
 
-
+# Required layers #
 class CausalSelfAttention(nn.Module):
     def __init__(self,config):
         super().__init__()
@@ -71,6 +72,7 @@ class CausalSelfAttention(nn.Module):
         self.headsize = config.n_embed//config.n_heads
         self.c_attn = nn.Linear(config.n_embed,3 *config.n_embed ,bias = config.Bias)
         self.c_proj = nn.Linear(config.n_embed,config.n_embed ,bias = config.Bias)
+        self.c_proj.res_flag = 1
         self.register_buffer("tril",torch.tril(torch.ones(config.block_size,config.block_size)).view(1,1,config.block_size,config.block_size))
         self.attdropout = nn.Dropout(config.dropout)
         self.mhdropout = nn.Dropout(config.dropout)
@@ -98,6 +100,7 @@ class MLP(nn.Module):
         self.c_fc =  nn.Linear(config.n_embed,4 *config.n_embed)
         self.gelu = nn.GELU(approximate="tanh")
         self.c_proj = nn.Linear(4 * config.n_embed,config.n_embed)
+        self.c_proj.res_flag = 1
 
     def forward(self,x):
         x = self.c_fc(x)
@@ -118,10 +121,12 @@ class Block(nn.Module):
         out = x + self.mlp(self.ln_2(x))
         return out
     
+    # Define GPt @ architecture #    
 class GPT(nn.Module):
+
     def __init__(self,config):
+        self.config = config
         super().__init__()
-        # print(nvocab,n_embed,block_size)
         self.transformer = nn.ModuleDict({
         "wte" : nn.Embedding(config.nvocab,config.n_embed),
         "wpe": nn.Embedding(config.block_size,config.n_embed),
@@ -130,8 +135,25 @@ class GPT(nn.Module):
         
         })
         self.lm_head=nn.Linear(config.n_embed,config.nvocab)
+        
+        #weight sharing between input and output transformation
+        
+        self.transformer.wte.weight = self.lm_head.weight
          # B,T,vocab_size
-    
+
+        self.apply(self._init_layers)
+    def _init_layers(self,module):
+        if isinstance(module,nn.Linear):
+            std = 0.02
+            if hasattr(module,"res_flag"):
+                std = ( 2 * self.config.n_layer) ** -0.5
+            nn.init.normal_(module.weight,0,std)
+            
+            if module.bias is not None:
+                nn.init.zeros_(module.bias)
+        if isinstance(module,nn.Embedding):
+            nn.init.normal_(module.weight,0,0.2)
+            
     def forward(self,idx,target=None):
         self.train()
         B,T, = idx.shape
@@ -158,7 +180,7 @@ class GPT(nn.Module):
         for _ in range(max_tokens):
             idx_cond = idx[:, -config.block_size:]
             logits,loss = self(idx_cond) # B,T,C
-            logits = logits[:,-1,:] #B,C Picking last time step
+            logits = logits[:,-1,:] #B,C Picking last time step as it is the predictoin of next letter
             probs = F.softmax(logits,dim=-1)
             idx_next = torch.multinomial(probs,1)
             idx =torch.cat((idx,idx_next), dim=1)
@@ -171,13 +193,13 @@ class GPTconfig:
     nvocab = tokenizer.n_vocab
     batch_size = 64
     block_size = 256
-    lr = 1e-3
-    max_iter = 1000
+    lr = 2e-3
+    max_iter = 50
     step_iter = 500
     eval_iter = 200
-    n_embed = 256
+    n_embed = 32
     n_heads = 8
-    n_layer = 8
+    n_layer = 4
     dropout = 0.2
     Bias = False
 hconfig = GPTconfig()
@@ -185,19 +207,19 @@ model = GPT(hconfig)
 m = model.to(device)
 optimizer = torch.optim.AdamW(model.parameters(), lr=hconfig.lr)
 print(sum(p.numel() for p in m.parameters())/1e6, 'M parameters')
-
+trainloader = DataLoader(4,32,train)
 
 #Training
 print(f"Start Training in {device}")
 for i in range(hconfig.max_iter):
-    if i % hconfig.step_iter== 0:
-        eloss = esitimate_loss()
-        print(f"Loss at {i}: Train loss: {eloss['train']} | Validation loss :{eloss['val']}")
+    # if i % hconfig.step_iter== 0:
+    #     eloss = esitimate_loss()
+    #     print(f"Loss at {i}: Train loss: {eloss['train']} | Validation loss :{eloss['val']}")
 
     #Forward Pass
-    xb,yb = get_batch('train',hconfig)
-    
+    xb,yb = trainloader.get_batch()
     logits,loss = model(xb,yb)
+    print(f"loss at step {i} {loss.item()}")
     
     #Backpass
     optimizer.zero_grad(set_to_none= True)
@@ -205,6 +227,7 @@ for i in range(hconfig.max_iter):
     optimizer.step()
 
 print(F" Final loss: {loss.item():.4f}")
+import sys; sys.exit(0)
 
 #Generation
 print(decode(model.generate(1000,idx = torch.zeros((1,1),dtype=torch.long,device=device),config=hconfig)[0].tolist()))
