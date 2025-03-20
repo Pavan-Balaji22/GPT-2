@@ -2,9 +2,9 @@
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
-# import mlflow as mlflow
 import math
 from dataclasses import dataclass
+import tiktoken
 
 
 
@@ -20,20 +20,25 @@ else:
 torch.manual_seed(1337)
 
 shakspheredata= open("shakeshpere.txt",mode="r",encoding="utf8").read()
-vocab = sorted(list(set(shakspheredata)))
+# vocab = sorted(list(set(shakspheredata)))
 
-stoi = {k:v for v,k in enumerate(vocab)}
-itos = {v:k for v,k in enumerate(vocab)}
-encode = lambda x:[stoi[i] for i in x]
-decode = lambda x: "".join([itos[i] for i in x])
+# stoi = {k:v for v,k in enumerate(vocab)}
+# itos = {v:k for v,k in enumerate(vocab)}
+# encode = lambda x:[stoi[i] for i in x]
+# decode = lambda x: "".join([itos[i] for i in x])
 
 #Data preparation
-text = torch.tensor(encode(shakspheredata))
-n = int(.9*len(text))
-train = text[:n]
-val = text[n:]
+# text = torch.tensor(encode(shakspheredata))
 
 
+tokenizer = tiktoken.get_encoding("gpt2")
+tokens = torch.tensor(tokenizer.encode(shakspheredata))
+encode = tokenizer.encode
+decode = tokenizer.decode
+
+n = int(.9*len(tokens))
+train = tokens[:n]
+val = tokens[n:]
 
 @torch.no_grad()
 def esitimate_loss():
@@ -51,9 +56,9 @@ def esitimate_loss():
 
 def get_batch(split:str,config):
     data = train if split == "train" else val
-    ix =  torch.randint(len(data) - config.block_size ,(config.batch_size,))
-    x = torch.stack([data[i:i+config.block_size] for i in ix])
-    y = torch.stack([data[i+1:i+config.block_size+1] for i in ix])
+    data = data[torch.randint(high=len(data),size=((config.batch_size*config.block_size)+1,))]
+    x = data[:-1].view(config.batch_size,config.block_size)
+    y = data[1:].view(config.batch_size,config.block_size)
     x, y = x.to(device), y.to(device)
     return x,y
 
@@ -163,7 +168,7 @@ class GPT(nn.Module):
 # Hyper Parameters
 @dataclass
 class GPTconfig:
-    nvocab = len(vocab)#50257
+    nvocab = tokenizer.n_vocab
     batch_size = 64
     block_size = 256
     lr = 1e-3
